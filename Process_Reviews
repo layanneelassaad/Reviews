@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created in July 30, 2023
+@author: Layanne El Assaad
+"""
+
+import pandas as pd
+import numpy as np
+from selenium import webdriver
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from time import sleep
+import json
+from datetime import datetime
+from math import ceil
+import re
+import os
+import requests
+import random as rand
+
+# Update this path with the appropriate Chrome WebDriver path for your OS
+chrome_driver_path = "/Users/jc_juls/Documents/Crawlers/Chromewebdriver/chromedriver"
+os.chdir('/Users/jc_juls/Documents/Projects/Pulsar/Crawlers/Amazon/Reviews/')
+
+# Open the browser
+browser = None
+
+def OpenBrowser():
+    global browser, chrome_driver_path
+    options = webdriver.ChromeOptions()
+    options.add_experimental_option("excludeSwitches", ["ignore-certificate-errors"])
+    options.add_argument('--disable-gpu') 
+    #options.add_argument('--headless') # hide google user interface
+    options.add_argument('--no-sandbox')
+    options.add_argument("window-size=1920,1080")
+    browser = webdriver.Chrome(executable_path=chrome_driver_path, options=options)
+    browser.set_window_size(1440, 1080)
+    browser.get('https://www.amazon.com/dp/B08SCNJBRR')
+    # Add any additional setup steps if required
+    # ...
+
+def RecordRating(val):
+    if '1' in val[0]:
+        col = '1_star_pct'
+    elif '2' in val[0]:
+        col = '2_star_pct'
+    elif '3' in val[0]:
+        col = '3_star_pct'
+    elif '4' in val[0]:
+        col = '4_star_pct'
+    elif '5' in val[0]:
+        col = '5_star_pct'
+    value = int(re.sub("[^0123456789.\']","",val[1]))
+    value = value / 100
+    return col, value
+
+def GetReviewRating(rev):
+    for v in range(1, 6):
+        try:
+            rev.find_element(By.XPATH, ".//i[contains(@class,'a-star-{}')]".format(v))
+            return int(v)
+        except:
+            continue
+    return None
+
+def ProcessReviews(reviews):
+    global rev_data, browser
+    for rev in reviews:
+        if 'global ratings' in rev.text or 'with reviews' in rev.text or 'total ratings' in rev.text:
+            continue
+
+        rid = rev.find_element(By.XPATH, ".//div[contains(@id,'customer_review')]").get_attribute('id').replace('customer_review-', '')
+        if rid not in rev_data.rev_id.unique():
+            genome = rev.find_element(By.XPATH, ".//div[contains(@data-hook,'genome-widget')]").text
+            rev_rating = GetReviewRating(rev)
+            review_date = rev.find_element(By.XPATH, ".//span[contains(@data-hook,'review-date')]").text
+            verified = 1 if 'Verified Purchase' in rev.text else 0
+            review_body = rev.find_element(By.XPATH, ".//span[contains(@data-hook,'review-body')]").text
+
+            i_rev = rev_data.shape[0]
+            rev_data.at[i_rev, 'rev_id'] = rid
+            rev_data.at[i_rev, 'ASIN'] = asin
+            rev_data.at[i_rev, 'updated_date'] = datetime.now().strftime('%Y-%m-%d')
+            rev_data.at[i_rev, 'genome'] = genome
+            rev_data.at[i_rev, 'rating'] = rev_rating
+            rev_data.at[i_rev, 'date'] = review_date
+            rev_data.at[i_rev, 'verified'] = verified
+            rev_data.at[i_rev, 'body'] = review_body
+        else:
+            print('\tAlready in DB ' + asin + ' id: ' + rid)
+    return True
+
+def GetPrice():
+    global browser
+    try:
+        price = browser.find_element(By.ID, 'apex_offerDisplay_desktop')
+        try:
+            price = price.find_element(By.CLASS_NAME, 'a-price-whole').text + '.' + price.find_element(By.CLASS_NAME, 'a-price-fraction').text    
+        except:
+            try:
+                price = price.find_elements(By.XPATH, './/span[contains(@class,"a-offscreen")]')[0]
+                price = re.sub("[^0123456789.\']","",price.get_attribute('innerHTML'))
+            except:
+                price = ''
+                pass
+    except:
+        price = ''
+    return price
+
+def GetBrand():
+    global browser
+    try:
+        browser.find_element(By.XPATH, '//img[contains(@alt,"Sorry")]')        
+        brand = ''
+    except:
+        sleep(rand.randint(18, 20)/10)
+        try:
+            brand = browser.find_element(By.CLASS_NAME, 'po-brand')    
+            brand = brand.find_elements_by_css_selector('span')[-1].text
+        except:
+            try:
+                brand = browser.find_element(By.ID, 'bylineInfo')    
+                brand = brand.text.replace('Brand: ','').strip()
+                brand = brand.replace('Visit the ','')
+                brand = brand.replace('Store','').strip()
+            except:
+                brand  = ''
+    return brand
+
+def GetDimensions():
+    global browser
+    try:
+        dim = browser.find_element(By.ID, 'detailBullets_feature_div')
+        for d in dim.find_elements_by_css_selector('li'):
+            if 'Product Dimensions' in d.text:
+                break
+        dim = d.find_elements_by_css_selector('span')[-1].text
+        dim_sour = 'product'
+    except:
+        try:
+            dim = browser.find_element(By.ID, 'productDetails_techSpec_section_1')
+            for d in dim.find_elements_by_css_selector('tr'):
+                if 'Dimensions' in d.text:
+                    break
+            dim = d.find_elements_by_css_selector('td')[-1].text
+            dim_sour = 'technical'
+        except:
+            try:
+                dim = browser.find_element(By.ID, 'productDetails_detailBullets_sections1')
+                for d in dim.find_elements_by_css_selector('tr'):
+                    if 'Dimensions' in d.text:
+                        break
+                dim = d.find_elements_by_css_selector('td')[-1].text
+                dim_sour = 'package'
+            except:
+                dim = ''
+                dim_sour = ''
+    return dim, dim_sour
+
+# In[Open browser]:
+OpenBrowser()
+
+# In[get asins from store front]
+
+def GetASINSfromStoreFront(store_url):
+
+    #store_url = 'https://www.amazon.com/stores/page/944190B1-1127-4528-AEBB-4F3D21ED22C3?ingress=0&visitId=1b6e2d60-3194-4d48-b493-5dbee2337b30'
+    
+
+    browser.get(store_url)
+    
+    all_products_view = browser.find_element(By.XPATH, '//span[contains(text(),"All Products")]').find_element(By.XPATH, '..')
+    all_products_view.click()
+    
+    WebDriverWait(browser,60).until(EC.presence_of_element_located((By.XPATH, '//li[contains(@class,"ProductGridItem")]')))
+    
+    products = browser.find_elements(By.XPATH, '//li[contains(@class,"ProductGridItem")]' )
+    len(products)
+    
+    asins_list = []
+    for p in products:
+        hrefs = p.find_elements(By.CSS_SELECTOR,"a")
+        for h in hrefs:
+            if 'dp' in h.get_attribute('href'):
+                asin = h.get_attribute('href')
+                asin = asin.split('dp/')[1].split('?')[0]
+                if asin not in asins_list:
+                    asins_list.append(asin)
+
+    return asins_list
+
+brand = 'Tru Lite bedding'
+store_url = 'https://www.amazon.com/stores/page/944190B1-1127-4528-AEBB-4F3D21ED22C3?ingress=0&visitId=1b6e2d60-3194-4d48-b493-5dbee2337b30'
+asins = GetASINSfromStoreFront(store_url)
+
+asins_df = pd.DataFrame()
+asins_df['asin'] = asins
+asins_df['brand'] = brand
+
+asins_df.to_csv(f'Raw data/Brands/{brand}/asins_list.csv',index=False)
+
+
+
+# In[set partition]:
+
+##################
+##################
+'UPDATE RUN NUMBER '
+run= 'run3'
+#best_selling_asins = pd.read_csv('best selling asins.csv')
+"""soap_asins = pd.read_parquet('Raw data/Soap_ASINs.parquet')
+soap_asins = soap_asins[soap_asins['Categories: Sub'] == 'Soaps'].copy()
+soap_asins[['ASIN','Sales Rank: 90 days avg.']].to_csv('Raw data/Soap_asins_only_soap.csv')"""
+#soap_asins = pd.read_csv('Raw data/Soap_asins_only_soap.csv')
+category = 'Bath_salts'
+file_name = 'bath_salts_asins.csv'
+soap_asins = pd.read_csv(f'Raw data/{file_name}')
+try:
+    os.listdir('Raw data/'+category)
+except FileNotFoundError:
+    os.makedirs('Raw data/'+category)
+    os.makedirs('Raw data/'+category+'/asins_in_process')
+
+files = os.listdir(f'Raw data/{category}/asins_in_process')
+
+runs = pd.DataFrame()
+for f in files:
+    if f.startswith('run'):
+        temp =pd.read_csv(f'Raw data/{category}/asins_in_process/'+f)
+        runs = pd.concat([temp,runs])
+if runs.shape[0]>0:
+    asins_to_process = soap_asins[~soap_asins.ASIN.isin(runs.ASIN)]
+else:
+    asins_to_process = soap_asins
+asins_to_process = asins_to_process['ASIN'].iloc[0:500]
+asins_to_process = pd.DataFrame(asins_to_process)
+asins_to_process.to_csv(f'Raw data/{category}/asins_in_process/'+run+'.csv',index=False)
+
+NUM_REVIEWS_TO_GET_PER_ASIN = 5000
+# asins_to_process = pd.read_csv('Raw data/Soap_data/asins_in_process/'+run+'.csv')
+
+# In[]:
+base=f'/Users/Julio/Documents/expertis/Spiders/Amazon/Raw data/{category}/asins_in_process/'
+base_asin_url = 'https://www.amazon.com/dp/{}'
+asin_data = pd.DataFrame(columns=['ASIN','brand','price'])
+rev_data = pd.DataFrame(columns=['rev_id','ASIN','updated_date','genome','rating','date','verified','body'])
+#asin_data = pd.read_csv('asin_data.csv')
+#rev_data = pd.read_csv('Raw data/Process2/rev_data_p2_1000-1500.csv')
+#basepath
+ref = 0
+# In[Continue]:
+i_d = asin_data.shape[0]
+for asin in asins_to_process[ref:].ASIN:
+    print('Starting: {} | {:%}'.format(asin,ref/asins_to_process.shape[0]))#best_selling_asins.shape[0]))
+    browser.get(base_asin_url.format(asin))
+    am_asin = browser.current_url.split('https://www.amazon.com/dp/')[-1].split('?')[0]
+    v = requests.get('https://reviewmeta.com/api/amazon/{asin}'.format(asin=am_asin))
+    sleep(rand.randint(8,12)/10)
+    try:
+        re_meta = v.json()
+    except:
+        re_meta = {}    
+    
+    sleep(rand.randint(48, 60)/10)
+    i_d += 1
+    try:
+        total_rating_count = browser.find_element(By.XPATH,"//div[contains(@data-hook,'total-review-count')]")
+        total_rating_count = int(re.sub("[^0123456789.\']","",total_rating_count.text))
+    except:
+        ref+=1
+        continue
+    asin_data.at[i_d,'ASIN']= asin 
+    asin_data.at[i_d,'total_rating_count']= total_rating_count
+    
+    rating = browser.find_elements_by_id('histogramTable')[-1]
+    rating = rating.find_elements_by_css_selector('tr')
+    
+    for r in rating:
+        val = r.text
+        val = val.splitlines()
+        if len(val)==2:
+            col ,value = RecordRating(val)
+            asin_data.at[i_d,col]= value
+    
+    #GET PRICE IF AVAILABLE
+    price = GetPrice()
+    brand = GetBrand()
+    dim , dim_sour = GetDimensions()
+            
+    asin_data.at[i_d,'dimensions_source'] = dim_sour
+    asin_data.at[i_d,'dimensions'] = dim
+    
+    # see all reviews clcik
+    sleep(rand.randint(5, 15)/10)
+    try:
+        browser.find_element(By.XPATH,"//a[contains(@data-hook,'see-all-reviews-link-foot')]").click()
+    except:
+        try:
+            element = browser.find_element(By.XPATH,"//a[contains(text(),'See all reviews')]")
+            actions = ActionChains(browser)
+            actions.move_to_element(element).perform()
+            sleep(.8)
+            element.click()
+        except:
+            try:
+                browser.find_element(By.XPATH,"//a[contains(text(),'Next page')]")
+            except:
+                ref+=1
+                continue
+    sleep(rand.randint(10, 30)/10)
+    try:
+        numer_of_reviews = browser.find_element(By.XPATH,"//div[contains(@data-hook,'cr-filter-info-review-rating-count')]")
+        numer_of_reviews = numer_of_reviews.text.split('total ratings,')[-1]
+        numer_of_reviews = int(re.sub("[^0123456789.\']","",numer_of_reviews))
+    except:
+        try:
+            browser.find_element(By.XPATH,"//a[contains(@data-hook,'see-all-reviews-link-foot')]").click()
+            sleep(rand.randint(30, 50)/10)
+            numer_of_reviews = browser.find_element(By.XPATH,"//div[contains(@data-hook,'cr-filter-info-review-rating-count')]")
+            numer_of_reviews = numer_of_reviews.text.split('total ratings,')[-1]
+            numer_of_reviews = int(re.sub("[^0123456789.\']","",numer_of_reviews))
+        except:
+            ref+=1
+            continue
+    asin_data.at[i_d,'numer_of_reviews']= numer_of_reviews
+    asin_data.at[i_d,'updated_date'] = datetime.now().strftime('%Y-%m-%d')
+    asin_data.at[i_d,'price'] = price
+    asin_data.at[i_d,'brand'] = brand
+
+    asin_data.at[i_d,'rev_meta_rating'] = None if re_meta.get('rating') in ['','N/A'] else re_meta.get('rating')
+    asin_data.at[i_d,'rev_meta_overall'] = None if re_meta.get('s_overall') in ['','N/A'] else re_meta.get('s_overall')
+    asin_data.at[i_d,'rev_meta_count'] = None if re_meta.get('count') in ['','N/A'] else re_meta.get('count')
+    
+    #for n_rev_page in range(min(15,ceil(numer_of_reviews/10))):
+    #for n_rev_page in range(10,ceil(numer_of_reviews/10)+1):
+    numer_of_reviews = min(NUM_REVIEWS_TO_GET_PER_ASIN,numer_of_reviews)
+    for n_rev_page in range(ceil(numer_of_reviews/10)):
+        reviews = browser.find_elements(By.XPATH,"//div[contains(@data-hook,'review')]")
+        flag=False
+        while flag is False:
+            try:
+                flag = ProcessReviews(reviews)
+            except :
+                flag = True
+        #if flag == -1:
+        #    break
+        if n_rev_page == ceil(numer_of_reviews/10)-1:
+            pass
+        else:
+            sleep(rand.randint(30, 50)/10)
+            try:
+                browser.find_element(By.XPATH,"//a[contains(text(),'Next page')]").click()
+            except:
+                continue
+        sleep(rand.randint(18, 40)/10)
+    sleep(rand.randint(5, 10)/10)
+    print('{} num of reviews {} | {:%}'.format(asin,numer_of_reviews,ref/asins_to_process.shape[0]))#best_selling_asins.shape[0]))
+    ref+=1
+    
+    asin_data.to_parquet(base+'asins_data_'+run+'.parquet.gzip',compression='gzip',index=False)
+    rev_data.to_parquet(base+'rev_data_'+run+'.parquet.gzip',compression='gzip',index=False)
+asin_data.to_parquet(base+'asins_data_'+run+'.parquet.gzip',compression='gzip',index=False)
+rev_data.to_parquet(base+'rev_data_'+run+'.parquet.gzip',compression='gzip',index=False)
+
+
+
+print('Total asin reviews {}\nReviews collected: {} |{:%}'.format(asin_data.numer_of_reviews.sum(),
+                                                                  rev_data.shape[0],
+                                                                  rev_data.shape[0]/asin_data.numer_of_reviews.sum()))
+#browser.close()
+'''
+rev_data.ASIN.value_counts()
+rev_data.rating.value_counts()
+rev_data[rev_data.date.str.contains('d in Canada on April 6, 2019')]
+rev_data.loc[117]
+rev_data.describe(include='all')
+asin_data.iloc[0]
+'''

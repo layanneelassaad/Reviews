@@ -1,0 +1,1831 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on June 30th, 2023
+
+@author: Layanne El ASSAD
+"""
+
+
+# In[config]:
+
+import pandas as pd
+import numpy as np
+#from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
+#from selenium.webdriver.support.select import Select
+from selenium.webdriver.common.by import By
+from time import sleep
+#from selenium.webdriver.common.keys import Keys
+
+import json, numpy ,time, requests
+from datetime import datetime,date,timedelta
+from math import ceil
+import re, os
+#os.chdir('C:\\Users\\a-jsotelo2\\Downloads')
+#os.chdir('/Users/Julio/Documents/expertis/Spiders/Amazon')
+os.chdir('/Users/jc_juls/Documents/Projects/Pulsar/Crawlers/Amazon/Reviews/')
+
+#import glob
+#import os
+
+import random as rand
+import matplotlib.pyplot as plt
+
+
+#chrome_driver_path =  r"C:\Restore\chromedriver"
+#chrome_driver_path = "/Users/Julio/Documents/expertis/CocinaLibre/Miami/chromedriver"
+chrome_driver_path = "/Users/jc_juls/Documents/Crawlers/Chromewebdriver/chromedriver"
+#download_folder = r"C:\\Users\\Administrator\Downloads\\"
+#results_folder = r"C:\\Restore\Helium\\"
+
+browser = None
+
+def OpenBrowser():
+    global browser
+    global chrome_driver_path
+    options = webdriver.ChromeOptions()
+    options.add_experimental_option("excludeSwitches",["ignore-certificate-errors"])
+    options.add_argument('--disable-gpu') 
+    #options.add_argument('--headless') # hide google user interface
+    options.add_argument('--no-sandbox')
+    options.add_argument("window-size=1920,1080")
+    chrome_driver_path = chrome_driver_path   
+    browser = webdriver.Chrome(executable_path=chrome_driver_path, options= options) # el dirver es especifico para linux
+    browser.set_window_size(1440, 1080)
+
+def RecordRating(val):
+    if '1' in val[0]:
+        col = '1_star_pct'
+    if '2' in val[0]:
+        col = '2_star_pct'
+    if '3' in val[0]:
+        col = '3_star_pct'
+    if '4' in val[0]:
+        col = '4_star_pct'
+    if '5' in val[0]:
+        col = '5_star_pct'
+    value = int(re.sub("[^0123456789.\']","",val[1]))
+    value = value / 100
+    return col, value
+
+def GetReviewRating(rev,v='1'):
+    for v in range(1,6):
+        try:
+            rev.find_element(By.XPATH ,".//i[contains(@class,'a-star-{}')]".format(v))
+            return int(v)
+        except:
+            continue
+       
+
+def ProcessReviews(reviews):
+    global rev_data, browser
+    for rev in reviews:
+        if 'global ratings' == rev.text[-14:] or 'with reviews' == rev.text[-12:] or 'total ratings' == rev.text[-13:]:
+            continue
+        rid = rev.find_element(By.XPATH ,".//div[contains(@id,'customer_review')]").get_attribute('id').replace('customer_review-','')
+        if rid not in rev_data.rev_id.unique():
+            genome = rev.find_element(By.XPATH ,".//div[contains(@data-hook,'genome-widget')]").text
+            rev_rating = GetReviewRating(rev)
+            review_date = rev.find_element(By.XPATH ,".//span[contains(@data-hook,'review-date')]").text
+            verified = 1 if 'Verified Purchase' in rev.text else 0
+            review_body = rev.find_element(By.XPATH ,".//span[contains(@data-hook,'review-body')]").text
+            
+            #print(rev_rating)
+            i_rev = rev_data.shape[0]
+            rev_data.at[i_rev,'rev_id'] = rid
+            rev_data.at[i_rev,'ASIN'] = asin
+            rev_data.at[i_rev,'updated_date'] = datetime.now().strftime('%Y-%m-%d')
+            rev_data.at[i_rev,'genome'] = genome
+            rev_data.at[i_rev,'rating'] = rev_rating
+            rev_data.at[i_rev,'date'] = review_date
+            rev_data.at[i_rev,'verified'] = verified
+            rev_data.at[i_rev,'body'] = review_body
+    return True
+
+
+
+# In[preprocess analysis]:
+    
+from sklearn.cluster import KMeans
+
+def Text2WordList(x):
+    if pd.isna(x):
+        return ''
+    
+    processed_feature = x
+        # Remove all the special characters
+    #processed_feature = re.sub(r'\W', ' ', processed_feature)
+    
+    # remove all single characters
+    processed_feature= re.sub(r'\s+[a-zA-Z]\s+', ' ', processed_feature)
+    
+    # Remove single characters from the start
+    processed_feature = re.sub(r'\^[a-zA-Z]\s+', ' ', processed_feature) 
+    
+    # Substituting multiple spaces with single space
+    processed_feature = re.sub(r'\s+', ' ', processed_feature, flags=re.I)
+    
+    # Removing prefixed 'b'
+    #processed_feature = re.sub(r'^b\s+', '', processed_feature)
+    
+    # Converting to Lowercase
+    #processed_feature = processed_feature.lower()
+    
+    return processed_feature
+
+
+
+# In[model functions]:
+
+
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+analyser = SentimentIntensityAnalyzer()    
+
+def SetSentiment(score):
+    #if score['compound'] <0:
+    #    return -1
+    if score['neu'] != 0:    
+        if score['pos'] / score['neu'] > 0.8:
+            return 1
+        else:
+            return 0
+    elif score['neg'] > score['pos'] and score['neg'] > score['neu']:
+        return -1
+    elif score['pos'] > score['neg'] and score['pos'] > score['neu']:
+        return 1
+    else:
+        return 0
+# In[Load Reviews - merge  data]:
+# Relevant
+basepath = r'C:/Users/a-jsotelo2/Downloads/'
+basepath = '/Users/Julio/Documents/expertis/Spiders/Amazon/'
+basepath = f'/Users/jc_juls/Documents/Projects/Pulsar/Crawlers/Amazon/Reviews/'    
+
+#if category
+category = 'Bath_salts'
+rev_data = pd.read_csv(basepath + rf'Raw data/{category}/{category}_reviews_w_sentiment.csv')
+
+#if brand
+brand = 'Tru Lite bedding'
+brand = 'Hiccapop'
+category = None
+
+
+# In[Load Reviews - merge data for brand]:
+# Relevant for a brand
+files = os.listdir(f'Raw data/Brands/{brand}/asins_in_process')
+
+asin_data = pd.DataFrame()
+rev_data = pd.DataFrame()
+if len(files)>0:
+    for f in files:
+        if f.find('asins') > -1:
+            temp = pd.read_parquet(f'Raw data/Brands/{brand}/asins_in_process/'+f)
+            asin_data = pd.concat([temp,asin_data])
+        elif f.find('rev') >-1:
+            temp = pd.read_parquet(f'Raw data/Brands/{brand}/asins_in_process/'+f)
+            rev_data = pd.concat([temp,rev_data])
+del temp
+asin_data.to_csv(f'Raw data/Brands/{brand}/asin_data.csv',index=False)
+rev_data.to_csv(f'Raw data/Brands/{brand}/rev_data.csv',index=False)
+
+asin_data.to_parquet(f'Raw data/Brands/{brand}/{brand}_asins_data.parquet.gzip',compression='gzip',index=False)
+rev_data.to_parquet(f'Raw data/Brands/{brand}/{brand}_rev_data.parquet.gzip',compression='gzip',index=False)
+
+rev_data.reset_index( inplace = True,drop=True)
+asin_data.reset_index( inplace = True,drop=True)
+mask = asin_data[asin_data.brand == 'hiccapop'].index
+asin_data.loc[mask,'brand'] = brand
+
+# In[loading data for Category ]:
+# Relevant  for category
+asin_data = pd.DataFrame()
+rev_data = pd.DataFrame()
+brand = None
+#files = os.listdir(basepath+ f'\\Amazon\\{category}')
+files = os.listdir(basepath+ f'Raw data/{category}/asins_in_process/')
+for f in files:
+    #break
+    if f.startswith('asins'):
+        tmp = pd.read_parquet(basepath + rf'Raw data/{category}/asins_in_process/'+ f)
+        asin_data = pd.concat([tmp,asin_data])
+    elif f.startswith('rev'):
+        tmp = pd.read_parquet(basepath + rf'Raw data/{category}/asins_in_process/' + f)
+        rev_data = pd.concat([tmp,rev_data])
+del tmp
+
+asin_data.to_parquet(f'Raw data/{category}/asins_data.parquet.gzip',compression='gzip',index=False)
+rev_data.to_parquet(f'Raw data/Brands/{brand}/rev_data.parquet.gzip',compression='gzip',index=False)
+
+# In[Load Reviews - processed data]:
+
+rev_data = pd.read_csv(basepath + rf'Raw data/Brnads/{brand}/{category}_reviews_w_sentiment.csv')
+
+asin_data = pd.read_parquet(f'Raw data/Brands/{brand}/{brand}_asins_data.parquet.gzip')
+rev_data = pd.read_parquet(f'Raw data/Brands/{brand}/{brand}_rev_data.parquet.gzip')
+
+
+
+# In[processing data continues]:
+# Relevant
+asin_data['updated_date'] = pd.to_datetime(asin_data.updated_date,format='%Y-%m-%d')
+asin_data.sort_values('updated_date',ascending=False,inplace=True)
+asin_data = asin_data.groupby('ASIN',as_index=False).first()
+asin_data['rating'] = asin_data.apply(lambda x: 5*x['5_star_pct' ]+ 4 *x['4_star_pct'] + \
+                                                  3*x['3_star_pct'] + 2*x['2_star_pct'] + 1 * x['1_star_pct'],axis=1)
+if category:
+    asin_data.to_csv(basepath + rf'Raw data/{category}/{category}_asins.csv',index=False)
+else:
+    asin_data.to_csv(basepath + rf'Raw data/Brands/{brand}/{brand}_asins.csv',index=False)
+    
+rev_data = rev_data.groupby('rev_id',as_index=False).first()
+rev_data.reset_index(inplace=True,drop=True)
+rev_data['id'] =   rev_data.ASIN + '_'+ rev_data.index.astype(str)
+if category:
+    rev_data.to_csv(basepath + rf'Raw data/{category}/{category}_reviews.csv',index=False)
+else:
+    rev_data.to_csv(basepath + rf'Raw data/Brands/{brand}/{brand}_reviews.csv',index=False)
+    rev_data.to_parquet(f'Raw data/Brands/{brand}/rev_data.parquet.gzip',compression='gzip',index=False)
+    
+
+
+# target brand
+solimos_asins = asin_data.query(f" brand == '{brand}' ")
+
+
+# In[Text preprocesing and Sentiment Model]:
+# Relevant
+import nltk 
+import string
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from nltk import stem as stem
+def preprocessor(text): 
+    text = re.sub('<[^>]*>','',text)
+    emoticons = re.findall('(?::|;|=)(?:-)?(?:\)|\(|D|P)',text)
+    text = (re.sub('[\W]+', ' ', text.lower()) + ' '.join(emoticons).replace('-',''))
+    return text
+
+punctutation = set(string.punctuation)
+stop_words=set(stopwords.words('english'))
+stop_words.update(punctutation)
+stop_words.update('product')
+stop_words.update(stopwords.words('spanish'))
+
+rev_data.body.fillna('',inplace=True)
+rev_data['tokenized_text'] = rev_data.apply(lambda x: '' if pd.isna(x.body) else nltk.word_tokenize(preprocessor(x.body)),axis=1)
+
+for i in rev_data.index:
+    sentence = ' '.join(x for x in rev_data.loc[i].tokenized_text if x not in stop_words)
+    if pd.isna(sentence):
+        sentiment = None
+        sentence = ''
+    else:
+        score = analyser.polarity_scores(sentence)
+        sentiment = SetSentiment(score)
+        if sentiment ==0:    
+            #print("{:-<5}  {:-<5} {}".format(rev_data.loc[i].rating,sentiment,str(score)))
+            pass
+    rev_data.at[i,'sentiment'] = sentiment
+    rev_data.at[i,'sentimet_score_neg'] = score.get('neg')
+    rev_data.at[i,'sentimet_score_neu'] = score.get('neu')
+    rev_data.at[i,'sentimet_score_pos'] = score.get('pos')
+    rev_data.at[i,'sentimet_score_compound'] = score.get('compound')
+    rev_data.at[i,'sentence'] = sentence
+
+
+asin_data
+rev_data['sentimet_score_compound_flag'] = rev_data.apply(lambda x: x.sentimet_score_compound,axis=1)
+rev_data['sentimet_score_compound'].plot.hist()
+rev_data[rev_data.rating==5.]['sentimet_score_compound'].plot.hist()
+rev_data[rev_data.rating==4.]['sentimet_score_compound'].plot.hist()
+rev_data[rev_data.rating==1.]['sentimet_score_compound'].plot.hist()
+print(rev_data.sentimet_score_compound.value_counts())
+
+print(rev_data.groupby(['sentiment','rating']).ASIN.count())
+
+
+print(rev_data.sentiment.value_counts())
+rev_data.columns
+
+def SetRevDate(x):
+    rev_date = x.date.split('on')[-1].strip()
+    if rev_date =='':
+        return None
+    else:
+        return pd.to_datetime(rev_date ,format='%B %d, %Y').date()
+    
+rev_data['review_date'] = rev_data.apply(lambda x: SetRevDate(x) ,axis=1)
+rev_data.groupby('review_date').rev_id.nunique().plot.line()
+
+grouped_data = rev_data.groupby('review_date').rev_id.nunique()
+# Create a figure and axis
+fig, ax = plt.subplots()
+# Plot the line graph
+grouped_data.plot.line(ax=ax)
+# Customize the plot
+ax.set_title('Number of Unique Reviews per Date')
+ax.set_xlabel('Review Date')
+ax.set_ylabel('Number of Unique Reviews')
+# Remove the border
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(False)
+ax.spines['left'].set_visible(False)
+# Add grid lines
+ax.grid(True, linestyle='--', alpha=0.5)
+# Add labels to x-axis ticks for better readability (optional)
+ax.set_xticklabels(grouped_data.index, rotation=45, ha='right')
+# Show the plot
+plt.show()
+
+#####
+#####
+#####
+grouped_data = rev_data[rev_data.ASIN.isin(solimos_asins.ASIN)].groupby('review_date').rev_id.nunique()
+grouped_data = grouped_data.sort_values('index')
+# Create a figure and axis
+fig, ax = plt.subplots()
+# Plot the line graph
+grouped_data.plot.line(ax=ax)
+# Customize the plot
+ax.set_title(f'Number of Unique Reviews per Date for {brand}')
+ax.set_xlabel('Review Date')
+ax.set_ylabel('Number of Unique Reviews')
+# Remove the border
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['bottom'].set_visible(False)
+ax.spines['left'].set_visible(False)
+# Add grid lines
+ax.grid(True, linestyle='--', alpha=0.5)
+# Add labels to x-axis ticks for better readability (optional)
+ax.set_xticklabels(grouped_data.index, rotation=45, ha='right')
+# Show the plot
+plt.show()
+
+#####
+#####
+
+today = date.today()
+def SetRevTimeWeight(x):
+    #x = rev_data.iloc[0]
+    rev_date = x.date.split('on')[-1].strip()
+    if rev_date =='':
+        print('error on index : {}'.format(x.name))
+        return 0.
+    test = (today - pd.to_datetime(rev_date ,format='%B %d, %Y').date()).days
+    if test < 30*3:
+        return .9
+    elif test <30*6:
+        return .5
+    else:
+        return .2
+rev_data['review_time_weight'] = rev_data.apply(lambda x: SetRevTimeWeight(x) ,axis=1)
+rev_data['review_time_weight'].plot.hist()
+
+reviews_rating_sentimen_by_asin = rev_data.groupby('ASIN',as_index=False).agg(
+                            {'sentimet_score_compound':[min,
+                                                        lambda x: x.quantile(.25),
+                                                        np.mean,
+                                                        lambda x: x.quantile(.75),
+                                                        max],
+                            'rating':[min,
+                                                        lambda x: x.quantile(.25),
+                                                        np.mean,
+                                                        lambda x: x.quantile(.75),
+                                                        max]                             
+                             })
+
+reviews_rating_sentimen_by_asin.columns = reviews_rating_sentimen_by_asin.columns.droplevel(0)
+reviews_rating_sentimen_by_asin.columns = ['ASIN','sentiment_min','sentiment_q1','sentiment_mean','sentiment_q3','sentiment_max',
+                             'rating_from_reviews_min','rating_from_reviews_q1','rating_from_reviews_mean','rating_from_reviews_q3','rating_from_reviews_max']
+#reviews_rating_sentimen_by_asin.to_csv(basepath+'Amazon\\SOAP\\'+ 'reviews_rating_sentimen_by_asin.csv',index=False)
+
+
+soap_asins = pd.read_csv(basepath + rf'Raw data/{category}/{category}_asins.csv')
+reviews_rating_sentimen_by_asin[reviews_rating_sentimen_by_asin.ASIN.isin(soap_asins.ASIN)].rating_from_reviews_mean.plot.hist()
+soap_asins = reviews_rating_sentimen_by_asin[reviews_rating_sentimen_by_asin.ASIN.isin(soap_asins.ASIN)].copy()
+soap_asins = soap_asins.merge(asin_data,
+                 how='left',
+                 on='ASIN')
+
+def SetWeightedRating(x):
+    global rev_data
+    # x=soap_asins.iloc[0]
+    asin = x.ASIN
+    rev_dat = rev_data[rev_data.ASIN == asin]
+    denominator = rev_dat.review_time_weight.sum()
+    numerator = (rev_dat.rating * rev_dat.review_time_weight).sum()
+    if denominator==0:
+        return None
+    else:
+        return numerator/denominator
+
+soap_asins['rating_review_weighted'] = soap_asins.apply(lambda x: SetWeightedRating(x),axis=1)
+soap_asins['rating_diff'] = soap_asins.rating - soap_asins.rating_from_reviews_mean
+soap_asins['rating_diff'].plot(title='Rating difference (mkt place vs reviews)')
+soap_asins['rating_diff'].plot.hist(title='Rating difference distribution (mkt place vs reviews)')
+soap_asins['rating_diff'].plot.hist(title='Rating difference distribution (mkt place vs reviews)',bins=30)
+soap_asins.plot.scatter(x='sentiment_mean',y='rating_diff')
+soap_asins.plot.scatter(x='sentiment_mean',y='rating')
+soap_asins.plot.scatter(x='sentiment_mean',y='rating_from_reviews_mean')
+
+
+soap_asins.to_csv(basepath + rf'Raw data/{category}/{category}_asins_summary.csv',index=False)
+from scipy import stats
+from scipy.stats import kurtosistest, skewtest
+k2, p = stats.normaltest(soap_asins['rating_diff'])
+alpha = 1e-3
+print("p = {:g}".format(p))
+if p < alpha:  # null hypothesis: x comes from a normal distribution
+    print("The null hypothesis can be rejected")
+else:
+    print("The null hypothesis cannot be rejected")
+
+kurtosistest(soap_asins['rating_diff']).pvalue < alpha
+skewtest(soap_asins['rating_diff']).pvalue < alpha
+
+
+
+# In[Dictionary]
+#nltk.download('wordnet')
+print('Starting: {}'.format(datetime.now()))#best_selling_asins.shape[0]))
+tokens = []
+i_tokens = 0
+for i in rev_data.index:
+    if pd.isna(rev_data.loc[i].sentence):
+        sentence = ''
+    else: 
+        sentence = preprocessor(rev_data.loc[i].sentence)
+    tokens.append(list(nltk.word_tokenize(sentence)))
+    tokens[i].sort()
+    i_tokens +=1
+''' Step 1 and 2, get stem words and set docId '''
+wnl = WordNetLemmatizer()
+snowball_en = stem.snowball.EnglishStemmer()
+snowball_es = stem.snowball.SpanishStemmer()
+snowball_it = stem.snowball.ItalianStemmer()
+
+
+stem_words = []
+not_stem_words = []
+tokens_doc_ref = []
+i = 0
+for doc in tokens:
+    # doc = tokens[2]
+    for word in doc:
+        # word=doc[2]
+        # stemming words
+        stem_words.append(wnl.lemmatize(snowball_en.stem(word)))
+        not_stem_words.append(wnl.lemmatize(snowball_en.stem(word)))
+        i +=1
+    tokens_doc_ref.append(i)
+
+
+lenght = len(stem_words)
+lenght = len(not_stem_words)
+
+# setting data frame
+#DicS1 = pd.DataFrame(numpy.arange(lenght*2).reshape(lenght,2), columns= ['Term','docId'])
+DicS1_no_stem = pd.DataFrame(numpy.arange(lenght*2).reshape(lenght,2), columns= ['Term','docId'])
+# setting stem words
+#DicS1['Term'] = stem_words
+DicS1_no_stem['Term'] = not_stem_words
+# setting docId
+for i in range(len(tokens_doc_ref)):
+    if i == 0:
+        #DicS1['docId'][0:tokens_doc_ref[0]] = i
+        DicS1_no_stem['docId'].loc[0:tokens_doc_ref[0]] = i
+    else:
+        #DicS1['docId'][tokens_doc_ref[i-1]:tokens_doc_ref[i]] = i
+        DicS1_no_stem['docId'].loc[tokens_doc_ref[i-1]:tokens_doc_ref[i]] = i
+
+
+# doc frequency
+#DicS1['DocFreq'] = DicS1.groupby(['Term','docId'])['docId'].transform(pd.Series.value_counts)
+DicS1_no_stem['DocFreq'] = DicS1_no_stem.groupby(['Term','docId'])['docId'].transform(pd.Series.value_counts)
+# total frequency
+#DicS1['TotFreq'] = DicS1.groupby('Term')['Term'].transform(pd.Series.value_counts)
+DicS1_no_stem['TotFreq'] = DicS1_no_stem.groupby('Term')['Term'].transform(pd.Series.value_counts)
+                        
+'''Setting Final dictionary'''
+#Dictionary = DicS1.drop_duplicates('Term').sort('Term')
+Dictionary_no_stem = DicS1_no_stem.drop_duplicates('Term').sort_values('Term')
+Dictionary_no_stem.pop('docId')
+#computing idf
+''' Total Number of Documentss'''
+N = rev_data.shape[0]
+#Dictionary['idf'] = np.log2(N/Dictionary['DocFreq'])
+Dictionary_no_stem['idf'] = np.log2(N/Dictionary_no_stem['DocFreq'])
+#Dictionary.reset_index(drop=True, inplace= True) # Re index withput saving previous index, and keep index
+Dictionary_no_stem.reset_index(drop=True, inplace= True) # Re index withput saving previous index, and keep index
+
+
+
+''' Postings, '''
+# groupd by creates the postings, how do we creat the dataframe with them?
+#DicS1.groupby(['Term','docId'])['docId']
+DicS1_no_stem.groupby(['Term','docId'])['docId']
+#postings = pan.DataFrame({'DocFreq' : DicS1.groupby( [ "Term", "docId"] ).size()}).reset_index()
+postings_no_stem = pd.DataFrame({'DocFreq' : DicS1_no_stem.groupby( [ "Term", "docId"]).size()}).reset_index()
+#postings['idf'] = np.log2(N/postings['DocFreq'])
+postings_no_stem['idf'] = np.log2(N/postings_no_stem['DocFreq'])
+
+#term_by_doc_mat = pan.pivot_table(postings, columns = ['docId'], values = 'DocFreq',index = 'Term', aggfunc = np.sum)
+"""term_by_doc_mat_no_stem = pd.pivot_table(
+    postings_no_stem, 
+    columns = ['docId'], 
+   values = 'DocFreq',
+    index = 'Term', 
+    aggfunc = np.sum)    
+#term_by_doc_mat['Term'] = term_by_doc_mat.index
+term_by_doc_mat_no_stem['Term'] = term_by_doc_mat_no_stem.index
+"""
+
+Dictionary_no_stem.to_csv(basepath + rf'Raw data/{category}/{category}_dictionary_no_stem.csv')
+postings_no_stem.to_csv(basepath + rf'Raw data/{category}/{category}_postings_no_stem.csv')
+#term_by_doc_mat_no_stem.to_csv(basepath+'term_by_doc_mat_no_stem.csv')
+print('End: {}'.format(datetime.now()))#best_selling_asins.shape[0]))
+# In[Query]:
+from scipy.sparse import csr_matrix
+import math
+
+def get_tf_idf_weights(tf_vec, df, N): 
+    'Computes tfidf weights from a term frequency vector and a document'
+    # tf_vec = tfidf_row[0]
+    # df=term_df
+    weight = [0]*len(tf_vec)
+    i = 0
+    for value in tf_vec:
+        if value > 0:
+            weight[i] = (1 + math.log(float(value),2)) * math.log(N/df,2)
+        i+=1
+    return weight
+
+
+def get_weights_per_term_vec(tfidf_row,N): 
+    'The input is a row from the term.doc.matrix, returns the cosine similarity' 
+    # tfidf_row = term_doc_mat[term]
+    term_df = 0
+    for x in tfidf_row: 
+        if x >0: 
+            term_df+=1
+    if tfidf_row[len(tfidf_row)-1] >0:
+        term_df -=1
+    tf_idf_vec = get_tf_idf_weights(tfidf_row, term_df, N)
+    return tf_idf_vec
+
+
+
+    
+def QueryProcess(query,N,treshold=.6):
+    # query ='fenomenal soap for kids'
+    qtokens = nltk.word_tokenize(query)
+    qtokens.sort()
+    ''' Step 1 and 2, get stem words and set docId '''
+    wnl = WordNetLemmatizer()
+    snowball_en = stem.snowball.EnglishStemmer()
+    
+    qstem_words = []
+    Q = []
+    
+    for word in qtokens:
+        # word=doc[2]
+        # stemming words
+        if word not in stop_words:
+            qstem_words.append(wnl.lemmatize(snowball_en.stem(word)))
+            Q.append(word)
+    
+    Qtimes = []
+    for i in range(len(Q)):
+        temp_count = Q.count(Q[i])
+        Qtimes.append(temp_count )
+    Qtimes
+    
+    # removing duplicates
+    largo = len(Q)
+    for i in range(largo):
+        try:
+            tempTerm = Q[i]    
+            for j in range(i+1,largo):        
+                if j>= largo:
+                    break
+                elif Q[j] == tempTerm:
+                    Q.remove(Q[j])
+                    Qtimes.remove(Qtimes[j])
+                    largo -= 1
+        except:
+            pass
+        
+    # creating matrix/vector
+    Qlenght = len(Q)
+    Qvector = pd.DataFrame(np.arange(Qlenght*2).reshape(Qlenght,2), columns= ['Term','QueryV'],index=Q)
+    Qvector['Term'] = Q
+    Qvector['QueryV'] = Qtimes
+    Qvector.reset_index(drop=True,inplace=True)
+    
+    postings_no_stem_to_compare = postings_no_stem[postings_no_stem.Term.isin(qtokens)].copy()
+    term_bydoc_mat = pd.pivot_table(
+        postings_no_stem_to_compare, 
+        columns = ['docId'], 
+       values = 'DocFreq',
+        index = 'Term', 
+        aggfunc = np.sum)    
+    term_bydoc_mat['Term'] = term_bydoc_mat.index
+    term_bydoc_mat.reset_index(drop=True,inplace=True)
+    term_bydoc_mat = term_bydoc_mat.merge(Qvector, on='Term', how='left' )
+    term_bydoc_mat.drop(term_bydoc_mat.index[[0]])
+    term_bydoc_mat.pop('Term')    
+    term_bydoc_mat = term_bydoc_mat.fillna(value=0)
+    #####
+    term_doc_mat = np.asarray(term_bydoc_mat.values)
+    tfidf_matrix = []
+    for term in range(term_doc_mat.shape[0]):
+        val = get_weights_per_term_vec(term_doc_mat[term],N)
+        tfidf_matrix.append(val)
+    #tfidf = pd.DataFrame(tfidf_matrix)
+    #tfidf.to_csv('/var/www/html/docsearch/static/media/tfidf_matrix.csv', sep=',')
+    # scale marix
+    tfidf_panframe = pd.DataFrame(tfidf_matrix)
+    tfidf_panframe = tfidf_panframe*tfidf_panframe 
+    scale = tfidf_panframe.sum()
+    scale = scale**(1/2)
+    tfidf_matrix = pd.DataFrame(tfidf_matrix)
+    tfidf_matrix = tfidf_matrix/ scale
+    
+    largo = len(list(tfidf_matrix.columns.values))
+    tfidf_matrix=tfidf_matrix.rename(columns = {largo-1:'QV'})
+    QryVector = tfidf_matrix['QV']
+    tfidf_matrix.pop('QV')
+    #tfidf_matrix.to_csv('/var/www/html/docsearch/static/media/tfidf_matrix.csv', sep=',')
+    #QryVector.to_csv('/var/www/html/docsearch/static/media/QryVector.csv', sep=',')
+    QryVector = np.asarray(QryVector.values)
+    tfidf_matrix = np.asarray(tfidf_matrix)
+    
+    Similarity = numpy.dot(QryVector,tfidf_matrix)
+    simi = pd.DataFrame(Similarity)
+    simi[0].value_counts()
+    
+    ref_to_select = pd.DataFrame(simi[0].value_counts())
+    ref_to_select.reset_index(drop=False,inplace=True)
+    ref_to_select.rename(columns={'index':'value'},inplace=True)
+    #ref_to_select.sort_values(0,inplace=True)
+    ref_to_select.sort_values('value',ascending=False,inplace=True)
+    ' Select treshold to select based on similarity'
+    #treshold  = 100
+    #ref_to_select = ref_to_select.iloc[:treshold]['value'].min()
+    ref_to_select = ref_to_select[ref_to_select.value>treshold].value.min()
+    
+    
+    selection = simi[simi[0]>=ref_to_select].reset_index()
+    selection.sort_values(by=0,ascending=False,inplace=True)
+    selection_asins = []
+    for sel in selection['index']:
+        selection_asins.append(term_bydoc_mat.iloc[:,sel].name)
+    res = rev_data[rev_data.index.isin(selection_asins)][['ASIN','body']]
+    res['similarity'] = selection[0].values
+    return res
+    
+# In[Try Queries]:    
+
+try:
+    os.listdir(basepath + rf'Raw data/{category}/queries/')
+except FileNotFoundError:
+    os.makedirs(basepath + rf'Raw data/{category}/queries/')
+    
+
+query = 'cheap, afoatable, '
+query = 'terruble for  kids, tires, pain, succs'
+query = 'I like this little caddy. Nice tough plastic. Would have been perfect except for the little slots in the bottom which I covered with plastic. Using it to store computer repair tools.'
+query = """ Disappointing. Very slow gallons per minute of chlorine. Too diluted to work as a roof cleaner. I think it said 4- 5 gallons per minute and that’s just total lie. """
+
+q_process = {
+    "query1" : "Mild smell, great for sensitive skin, affordable",
+    "query2" : "Mild smell, gentle on skin, affordable",
+    "query3" : "quality packaging and size, great for Airbnb guests",
+    "query4" : "sustinable packaging, good size, great for Airbnb guests",
+    "query5" : "Aesthetic packaging, good size, great for houseguests",
+    "query6" : "Bulk bar soap, individually wrapped, good value",
+    "query7" : "Luxurious packaging and feel, good quality, hotel, resort",
+    "query8" : "Hydrating feel, tea tree, airbnb",
+    "query9" : "Honey, smells so good, hotel soap",
+    "query10" : "Moisturizing soap, for kids, mild fragrance",
+    "query11" : "Moisturizing soap, for sensitive skin, mild fragrance",
+    "query12" : "Moisturizing soap, for dry skin skin, mild fragrance",
+}
+for q,query in q_process.items():
+    #break
+    print(q,query)
+    similarity = QueryProcess(query,N,treshold=.4)
+    print(similarity,rev_data.shape)
+    
+    similarity_by_asin = similarity.groupby('ASIN',as_index=False).agg({'similarity':[min,lambda x:x.quantile(.25),np.mean,lambda x:x.quantile(.75),max]})
+    similarity_by_asin.columns = similarity_by_asin.columns.droplevel(1)
+    similarity_by_asin.columns = ['ASIN','simi_min','simi_q1','simi_mean','simi_q3','simi_max']
+    similarity_by_asin.simi_mean.plot.hist(title='Mean similarity distritubtion')
+    
+    asin_data_for_query = pd.merge(asin_data,
+                                   similarity_by_asin,
+                                   on='ASIN',
+                                   how='inner')
+    len(asin_data_for_query.ASIN.unique())
+                                  
+    rev_data_asin_summary = rev_data.groupby('ASIN',as_index=False).agg({'sentimet_score_compound':np.mean,
+                                  'rating':np.mean,
+                                  'ASIN':['first',len]})
+    rev_data_asin_summary.columns = rev_data_asin_summary.columns.droplevel(1)
+    rev_data_asin_summary.columns = ['sentiment_score_compound', 'rating_from_reviews', 'ASIN', 'num_reviews']
+    def GettSentiment(x):
+        if pd.isna(x.sentiment_score_compound):
+            return None
+        elif x.sentiment_score_compound <.25:
+            return -1
+        elif x.sentiment_score_compound <.75:
+            return 0
+        else:
+            return 1
+    rev_data_asin_summary['sentiment'] = rev_data_asin_summary.apply(lambda x:GettSentiment(x) ,axis=1)
+    rev_data_asin_summary['sentiment'].value_counts()
+    
+    rev_data_asin_summary[rev_data_asin_summary.ASIN.isin(similarity.ASIN)]
+    
+    asin_data_for_query = asin_data_for_query.merge(rev_data_asin_summary,
+                               on='ASIN',
+                               how='left')
+    asin_data_for_query.columns
+    asin_data_for_query.sentiment.value_counts()
+    
+    asin_data_for_query.to_csv(basepath + rf'Raw data/{category}/queries/{q}_asins_data.csv',encoding='utf-8')
+    summa =asin_data_for_query.groupby('sentiment').agg({'ASIN':len,
+                                                  'rating_from_reviews':np.mean,
+                                                  'rating':np.mean,
+                                                  'simi_min':np.mean,
+                                                  'simi_q1':np.mean,
+                                                  'simi_mean':np.mean,
+                                                  'simi_q3':np.mean,
+                                                  'simi_max':np.mean,
+                                                  'sentiment_score_compound':[min,
+                                                                              lambda x: x.quantile(.25),
+                                                                              lambda x: x.quantile(.5),
+                                                                              lambda x: x.quantile(.75),
+                                                                              max]
+                                                  })
+    
+    asin_data_for_query.columns
+    summa.columns = summa.columns.droplevel(0)
+    summa.columns = ['ASIN','rating_from_reviews','rating',\
+                     'simi_min','simi_q1','simi_mean','simi_q3','simi_max',\
+                     'sentiment_min','sentiment_q1','sentiment_mean','sentiment_q3','sentiment_max']
+    print(summa,'\n'*3)
+    summa.to_csv(basepath + rf'Raw data/{category}/queries/{q}_asins_data_summary.csv',encoding='utf-8')
+
+# In[sentiment with textblob]:
+# Relevant
+from textblob import TextBlob
+from collections import Counter
+from wordcloud import WordCloud
+
+def sentiment_from_score(polarity,subjectivity):
+    if polarity > -0.05 and polarity < 0.05 :
+        return 'Neutral'
+    if polarity >0 :
+        if subjectivity <.5:
+            return 'Mixed - Positive'
+        else:
+            return 'Positive'
+    if polarity < 0:
+        if subjectivity <.5:
+            return 'Mixed - Negative'
+        else:
+            return 'Negative'
+            
+    
+
+# create a TextBlob object for each review
+review_blob = [TextBlob(review) for review in rev_data.sentence]
+
+# create a list of sentiment polarities for each review
+polarity_scores = [review.sentiment.polarity for review in review_blob]
+subjectivity_scores = [review.sentiment.subjectivity for review in review_blob]
+
+rev_data['textblob_polarity_scores'] = polarity_scores
+rev_data['textblob_subjectivity_scores'] = subjectivity_scores
+rev_data['textblob_sentiment'] = rev_data.apply(lambda x: sentiment_from_score(x.textblob_polarity_scores,x.textblob_subjectivity_scores),axis=1)
+rev_data['textblob_sentiment'].value_counts()
+
+
+'Sample mix'
+colors = ['#C98C9C','lightblue','red','grey','#36A0DF']
+fig, subplot = plt.subplots(nrows=1,ncols=2,figsize=(15,6))
+fig.suptitle("Sentiment Analytis of Reviews top 10 prducts")
+gp_all_products = rev_data.groupby('textblob_sentiment').size()
+gp_all_products.plot(kind='bar', ax=subplot[0],color=colors)
+gp_all_products.plot(kind='pie', ax=subplot[1],colors=colors,autopct='%1.1f%%')
+plt.show()
+
+
+# Define the colors for the bars and pie chart
+colors = ['#C98C9C', 'lightblue', 'red', 'grey', '#36A0DF']
+# Create the figure and subplots
+fig, subplot = plt.subplots(nrows=1, ncols=2, figsize=(15, 6))
+fig.suptitle(f"Sentiment Analysis of Reviews for sample")
+# Plot the bar chart
+gp_all_products = rev_data.groupby('textblob_sentiment').size()
+gp_all_products.plot(kind='bar', ax=subplot[0], color=colors)
+# Customize the bar chart
+subplot[0].set_xlabel('Sentiment')
+subplot[0].set_ylabel('Count')
+subplot[0].set_title('Distribution of Sentiments')
+subplot[0].grid(axis='y', linestyle='--', alpha=0.5)
+subplot[0].spines['top'].set_visible(False)
+subplot[0].spines['right'].set_visible(False)
+# Plot the pie chart
+gp_all_products.plot(kind='pie', ax=subplot[1], colors=colors, autopct='%1.1f%%')
+# Customize the pie chart
+subplot[1].set_title('Sentiment Mix')
+#subplot[1].legend(bbox_to_anchor=(1, 0.8))
+subplot[1].spines['top'].set_visible(False)
+subplot[1].spines['right'].set_visible(False)
+# Adjust the spacing between subplots
+plt.subplots_adjust(wspace=0.3)
+# Show the plot
+plt.show()
+
+
+
+####
+####
+####
+'Brand plot'
+
+
+# Define the colors for the bars and pie chart
+colors = ['#C98C9C', 'lightblue', 'red', 'grey', '#36A0DF']
+# Create the figure and subplots
+fig, subplot = plt.subplots(nrows=1, ncols=2, figsize=(15, 6))
+fig.suptitle(f"Sentiment Analysis of Reviews for {brand}")
+# Plot the bar chart
+gp_all_products = rev_data[rev_data.ASIN.isin(solimos_asins.ASIN)].groupby('textblob_sentiment').size()
+gp_all_products.plot(kind='bar', ax=subplot[0], color=colors)
+# Customize the bar chart
+subplot[0].set_xlabel('Sentiment')
+subplot[0].set_ylabel('Count')
+subplot[0].set_title('Distribution of Sentiments')
+subplot[0].grid(axis='y', linestyle='--', alpha=0.5)
+subplot[0].spines['top'].set_visible(False)
+subplot[0].spines['right'].set_visible(False)
+# Plot the pie chart
+gp_all_products.plot(kind='pie', ax=subplot[1], colors=colors, autopct='%1.1f%%')
+# Customize the pie chart
+subplot[1].set_title('Sentiment Mix')
+#subplot[1].legend(bbox_to_anchor=(1, 0.8))
+subplot[1].spines['top'].set_visible(False)
+subplot[1].spines['right'].set_visible(False)
+# Adjust the spacing between subplots
+plt.subplots_adjust(wspace=0.3)
+# Show the plot
+plt.show()
+
+####
+####
+####
+
+
+# Define the colors for the bars and pie chart
+colors = ['#C98C9C', 'lightblue', 'red', 'grey', '#36A0DF']
+# Create the figure and subplots
+fig, subplot = plt.subplots(nrows=1, ncols=2, figsize=(15, 6))
+fig.suptitle(f"Sentiment Analysis of Reviews without {brand}")
+# Plot the bar chart
+gp_all_products = rev_data[~rev_data.ASIN.isin(solimos_asins.ASIN)].groupby('textblob_sentiment').size()
+gp_all_products.plot(kind='bar', ax=subplot[0], color=colors)
+# Customize the bar chart
+subplot[0].set_xlabel('Sentiment')
+subplot[0].set_ylabel('Count')
+subplot[0].set_title('Distribution of Sentiments')
+subplot[0].grid(axis='y', linestyle='--', alpha=0.5)
+subplot[0].spines['top'].set_visible(False)
+subplot[0].spines['right'].set_visible(False)
+# Plot the pie chart
+gp_all_products.plot(kind='pie', ax=subplot[1], colors=colors, autopct='%1.1f%%')
+# Customize the pie chart
+subplot[1].set_title('Sentiment Mix')
+#subplot[1].legend(bbox_to_anchor=(1, 0.8))
+subplot[1].spines['top'].set_visible(False)
+subplot[1].spines['right'].set_visible(False)
+# Adjust the spacing between subplots
+plt.subplots_adjust(wspace=0.3)
+# Show the plot
+plt.show()
+
+
+####
+####
+####
+####
+
+
+'Negatives'
+negatives = rev_data[rev_data.textblob_sentiment == 'Negative']
+all_words = [word for sublist in negatives['tokenized_text'] for word in sublist]
+filtered_words = [word for word in all_words if word.lower() not in stop_words]
+word_freq = Counter(filtered_words)
+
+wc = WordCloud(width=800, height=500, max_words=100, background_color='white').generate_from_frequencies(word_freq)
+# Plot the wordcloud
+plt.figure(figsize=(10, 6))
+plt.imshow(wc, interpolation='bilinear')
+plt.axis('off')
+plt.title(f"Negative Sentiment", fontsize=16)
+plt.figure(figsize=(15, 13))
+plt.show()
+'for brand'
+negatives = rev_data[(rev_data.textblob_sentiment == 'Negative') &\
+                     (rev_data.ASIN.isin(solimos_asins.ASIN))]
+all_words = [word for sublist in negatives['tokenized_text'] for word in sublist]
+filtered_words = [word for word in all_words if word.lower() not in stop_words]
+word_freq = Counter(filtered_words)
+
+wc = WordCloud(width=800, height=500, max_words=100, background_color='white').generate_from_frequencies(word_freq)
+# Plot the wordcloud
+plt.figure(figsize=(10, 6))
+plt.imshow(wc, interpolation='bilinear')
+plt.axis('off')
+plt.title(f"Negative Sentiment", fontsize=16)
+plt.figure(figsize=(15, 13))
+plt.show()
+
+
+'Positives'
+positives = rev_data[rev_data.textblob_sentiment == 'Positive']
+all_words = [word for sublist in positives['tokenized_text'] for word in sublist]
+filtered_words = [word for word in all_words if word.lower() not in stop_words]
+word_freq = Counter(filtered_words)
+words_str = " ".join(w for w,v in word_freq.items() if v > 75)
+print(len(words_str))
+
+wc = WordCloud(width=800, height=500, max_words=100, background_color='white').generate_from_frequencies(word_freq)
+# Plot the wordcloud
+plt.figure(figsize=(10, 6))
+plt.imshow(wc, interpolation='bilinear')
+plt.axis('off')
+plt.title(f"Positive Sentiment", fontsize=16)
+plt.figure(figsize=(15, 13))
+plt.show()
+'for the brand'
+positives = rev_data[(rev_data.textblob_sentiment == 'Positive') &\
+                     (rev_data.ASIN.isin(solimos_asins.ASIN))]
+all_words = [word for sublist in positives['tokenized_text'] for word in sublist]
+filtered_words = [word for word in all_words if word.lower() not in stop_words]
+word_freq = Counter(filtered_words)
+words_str = " ".join(w for w,v in word_freq.items() if v > 75)
+print(len(words_str))
+
+wc = WordCloud(width=800, height=500, max_words=100, background_color='white').generate_from_frequencies(word_freq)
+# Plot the wordcloud
+plt.figure(figsize=(10, 6))
+plt.imshow(wc, interpolation='bilinear')
+plt.axis('off')
+plt.title(f"Positive Sentiment", fontsize=16)
+plt.figure(figsize=(15, 13))
+plt.show()
+
+
+
+# Record output
+if category:
+    rev_data.to_csv(basepath + rf'Raw data/{category}/{category}_reviews_w_sentiment.csv',index=False)
+else:
+    rev_data.to_csv(basepath + rf'Raw data/Brands/{brand}/{brand}_reviews_w_sentiment.csv',index=False)
+    rev_data.to_parquet(basepath + f'Raw data/Brands/{brand}/{brand}_rev_data.parquet.gzip',compression='gzip',index=False)
+
+
+
+html = rev_data[rev_data.ASIN.isin(solimos_asins.ASIN)][['id','body','textblob_sentiment']].to_html(index=False)
+  
+# write html to file
+text_file = open(basepath + rf'Raw data/{category}/{category}_solimo_revs.html', "w")
+text_file.write(html)
+text_file.close()
+
+
+# In[PCA]:
+# relevant
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+
+# Load data
+
+data = rev_data[['rev_id','body']].copy()
+data = data.dropna()
+
+# Preprocess text data
+vectorizer = TfidfVectorizer(stop_words='english')
+X = vectorizer.fit_transform(data['body'])
+
+
+# Perform k-means clustering
+num_clusters = 5
+kmeans = KMeans(n_clusters=num_clusters, random_state=42).fit(X)
+
+
+# Get cluster labels
+labels = kmeans.labels_
+labels_df = pd.DataFrame(labels)
+
+print(labels_df[0].unique())
+
+# Plot clusters
+#plt.scatter(X[:, 0], X[:, 1], c = kmeans.labels_, cmap='rainbow')
+#plt.show()
+
+
+# Get the 2 principal components of the data
+pca = PCA(n_components=.90)
+X_pca = pca.fit_transform(X.toarray())
+
+#print ('Variance ratio: \n', pca.explained_variance_ratio_ , '\n')
+print ('\nVariance Captured with 10 components %0.3f' % sum(pca.explained_variance_ratio_[:10]))
+print ('\nVariance Captured with 100 components %0.3f' % sum(pca.explained_variance_ratio_[:100]))
+print ('\nVariance Captured with 150 components %0.3f' % sum(pca.explained_variance_ratio_[:150]))
+print ('\nVariance Captured with 1000 components %0.3f \n' % sum(pca.explained_variance_ratio_[:1000]))
+print ('\nVariance Captured with 1700 components %0.3f \n' % sum(pca.explained_variance_ratio_[:1700]))
+
+
+
+# Convert TF-IDF matrix back to text
+text = vectorizer.inverse_transform(X)
+text = [' '.join(tokens) for tokens in text]
+len(text[0])
+
+pca_components = pd.DataFrame(pca.components_)
+
+
+# Plot clusters
+# Get frequency count of each cluster
+unique, counts = np.unique(labels, return_counts=True)
+cluster_sizes = dict(zip(unique, counts))
+# Format cluster sizes as string to display in legend
+cluster_sizes_str = [f'C-{k}: {v}' for k, v in cluster_sizes.items()]
+scatter = plt.scatter(X_pca[:, 0], X_pca[:, 1], c=labels, cmap='rainbow')
+plt.title("Review's clusters")
+plt.legend(handles = scatter.legend_elements()[0], labels = cluster_sizes_str, title="Clusters : Freq.", bbox_to_anchor=(1.35, 1), loc='upper right')
+plt.figure(figsize=(10, 6))
+plt.show()
+
+
+# Get the feature names (i.e., words)
+#feature_names = vectorizer.get_feature_names() # returns feature names for all components | this is deprecated
+feature_names = np.array(vectorizer.get_feature_names_out())
+len(feature_names)
+
+##### Get the top n features for each principal component
+feature_names = np.array(text)  
+n = 100
+top_features = []
+for i, component in enumerate(pca.components_):
+    # Multiply feature weights by component weights
+    scores = np.dot(component, X.toarray().T)
+    # Get indices of top n features
+    top_indices = np.argsort(scores)[-n:]
+    # Get top n features
+    top_words = [feature_names[j] for j in top_indices]
+    top_features.append(top_words)
+
+# Flatten the list of list of lists into a single list of words
+words = [word for sublist in [inner for outer in top_features for inner in outer] for word in sublist]
+# Count the frequency of each word
+word_freq = Counter(words)
+# Create the word cloud
+pca_components_wordcloud = WordCloud(width=800, height=800, background_color='white').generate_from_frequencies(word_freq)
+# Display the word cloud
+plt.figure(figsize=(10,8))
+plt.imshow(wordcloud, interpolation='bilinear')
+plt.axis('off')
+plt.title("Principal Components top_features")
+plt.show()
+#########
+#########
+# Plot each component in a word cloud
+
+# Generate a word cloud for each principal component
+for i, comp in enumerate(pca.components_[:20]):
+    # Sort the weights in descending order and get the indices
+    sorted_indices = np.argsort(abs(comp))[::-1][:20]
+    # Get the feature names and weights
+    feature_names = np.array(vectorizer.get_feature_names_out())
+    weights = comp[sorted_indices]
+    # Create a dictionary of the words and weights
+    words_dict = {feature_names[idx]: abs(weights[j]) for j, idx in enumerate(sorted_indices)}
+    # Create the wordcloud object
+    wc = WordCloud(width=800, height=500, max_words=50, background_color='white').generate_from_frequencies(words_dict)
+    # Plot the wordcloud
+    plt.figure(figsize=(10, 6))
+    plt.imshow(wc, interpolation='bilinear')
+    plt.axis('off')
+    plt.title(f"Principal Component {i+1}", fontsize=16)
+    plt.figure(figsize=(15, 13))
+    plt.show()
+
+
+
+
+
+#######
+
+# Project PCA-transformed data back into original feature space
+X_reconstructed = pca.inverse_transform(X_pca)
+X_reconstructed.shape
+
+# Predict clusters for reconstructed data
+labels_reconstructed = kmeans.predict(X_reconstructed)
+
+data['kmeans_cluster'] = labels_reconstructed
+
+# Get frequency count of each cluster
+unique, counts = np.unique(labels_reconstructed, return_counts=True)
+cluster_sizes = dict(zip(unique, counts))
+
+cluster_sizes_str = [f'C-{k}: {v}' for k, v in cluster_sizes.items()]
+scatter = plt.scatter(X_reconstructed[:, 0], X_reconstructed[:, 1], c=labels_reconstructed, cmap='rainbow',alpha=.5)
+plt.title("Review's clusters (PCA reconstructed)")
+plt.xlim([-0.05, .4])
+plt.ylim([-.01, .04])
+plt.legend(handles = scatter.legend_elements()[0], labels = cluster_sizes_str, title="Clusters : Freq.", bbox_to_anchor=(1.35, 1), loc='upper right')
+plt.figure(figsize=(10, 6))
+plt.show()
+
+
+# Get top n words for each cluster
+n_top_words = 15
+top_words = []
+for i in range(num_clusters):
+    cluster_center = kmeans.cluster_centers_[i]
+    top_word_indices = np.argsort(cluster_center)[::-1][:n_top_words]
+    top_words.append([feature_names[j] for j in top_word_indices])
+
+# Print top words for each cluster
+for i in range(num_clusters):
+    print(f"Cluster {i}: {' '.join(top_words[i])}")
+    
+
+
+# Generate a word cloud for each cluster
+for i in range(num_clusters):
+    # Get the indices of the reviews in the cluster
+    cluster_indices = np.where(labels == i)[0]
+    
+    # Combine the text of the reviews in the cluster into a single string
+    cluster_text = ' '.join([data['body'].iloc[idx] for idx in cluster_indices])
+    
+    # Generate a word cloud for the cluster text
+    wordcloud = WordCloud(background_color="white").generate(cluster_text)
+    
+    # Display the word cloud
+    plt.imshow(wordcloud, interpolation='bilinear')
+    plt.axis("off")
+    plt.title(f"Cluster {i}")
+    plt.figure(figsize=(10, 6))
+    plt.show()
+    
+
+# In[Summarize components]:
+# Relevant
+import openai
+openai.api_key = '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'
+
+pca_summaries = pd.DataFrame()
+pca_summaries['word_dict'] = None
+# Get the words associated with each component
+feature_names = vectorizer.get_feature_names_out()
+for i, component in enumerate(pca.components_):
+    ## #
+    sorted_indices = np.argsort(abs(component))[::-1][:10]
+    # Get the feature names and weights
+    feature_names = np.array(vectorizer.get_feature_names_out())
+    weights = component[sorted_indices]
+    component_weight = pca.explained_variance_ratio_[i]
+    # Create a dictionary of the words and weights
+    words_dict = {feature_names[idx]: abs(weights[j]) * component_weight for j, idx in enumerate(sorted_indices) if abs(weights[j]) >=.01}
+    
+    ###
+    ###
+    i_df = pca_summaries.shape[0]
+    pca_summaries.at[i_df,'component'] = f'pca_{i+1}'
+    pca_summaries.at[i_df,'word_dict'] = words_dict
+    
+
+####
+'Review values and word that remain'
+great_value = 0
+for i in pca_summaries.index:
+    wd = pca_summaries.loc[i].word_dict
+    val = wd.get('expensive',0)
+    if val>0:
+        print(pca_summaries.loc[i].component)
+    great_value += val
+
+#####
+'Get final words and sort dict in descending order'
+final_word_dict = {}
+for i in pca_summaries.index:
+    wd = pca_summaries.loc[i].word_dict
+    for key,value in wd.items():
+        if key in final_word_dict:
+            final_word_dict[key] += value
+        else:
+            final_word_dict[key] = value
+
+# sort the final_word_dict based on values in descending order
+final_word_dict = dict(sorted(final_word_dict.items(), key=lambda x: x[1], reverse=True))
+
+#####
+'Get summary from OpenAI GTP'
+words_str = " ".join(w for w,v in final_word_dict.items() if v > 0.001) # keep the list of word unthe 4k wokrd
+print(len(words_str )) # if th elist under o not?
+# Pass the words to OpenAI API for summarization
+summary = openai.Completion.create(
+    engine="text-davinci-003",
+    #prompt=f"Summarize the product category using the following words extracted form reviews: {words_str}",
+    prompt=f"Summarize a brand using the following words extracted form reviews: {words_str}",
+    max_tokens=300, # to be returned
+    n=1,
+    stop=None,
+    temperature=0.01,
+)
+
+category_summary = pd.DataFrame()
+category_summary.at[0,'category']= category
+category_summary.at[0,'summary'] = summary.choices[0].text.replace('\n','')
+category_summary['word_dict'] = None
+category_summary.at[0,'word_dict']= final_word_dict
+
+category_summary.to_csv(basepath + rf'Raw data/{category}/{category}_summary.csv',index=False)
+category_summary.to_parquet(basepath + rf'Raw data/{category}/{category}_summary.parquet',index=False)
+
+print(f" {summary.choices[0].text}")
+
+
+# In[analyze solimo vs category]:
+# Relevant
+
+solimos_asins = pd.read_csv(basepath + rf'Raw data/Brands/{brand}/{brand}_asins.csv')
+solimos_asins  = solimos_asins.query(' brand == @brand ')
+
+sol_asin_list = "".join("'"+x+"'," for x in solimos_asins.ASIN.unique())
+sol_asin_list = "'B078K1W9B3'"
+solimos_reviews = rev_data.query(f' ASIN in ({sol_asin_list }) ').copy()
+
+data_solimo = solimos_reviews[['rev_id','body']].copy()
+data_solimo = data_solimo.dropna()
+
+
+X_solimo = vectorizer.transform(data_solimo.body)
+pca_solimo = PCA(n_components=.95)
+X_pca_solimo = pca_solimo.fit_transform(X_solimo.toarray())
+
+
+pca_summaries_solimo = pd.DataFrame()
+pca_summaries_solimo['word_dict'] = None
+# Get the words associated with each component
+feature_names = vectorizer.get_feature_names_out()
+for i, component in enumerate(pca_solimo.components_):
+    ## #
+    sorted_indices = np.argsort(abs(component))[::-1][:10]
+    # Get the feature names and weights
+    feature_names = np.array(vectorizer.get_feature_names_out())
+    weights = component[sorted_indices]
+    component_weight = pca_solimo.explained_variance_ratio_[i]
+    # Create a dictionary of the words and weights
+    words_dict = {feature_names[idx]: abs(weights[j]) * component_weight for j, idx in enumerate(sorted_indices) if abs(weights[j]) >=.01}
+    
+    ###
+    ###
+    i_df = pca_summaries_solimo.shape[0]
+    pca_summaries_solimo.at[i_df,'component'] = f'pca_{i+1}'
+    pca_summaries_solimo.at[i_df,'word_dict'] = words_dict
+
+#####
+'Get final words and sort dict in descending order'
+final_word_dict_solimo = {}
+for i in pca_summaries_solimo.index:
+    wd = pca_summaries_solimo.loc[i].word_dict
+    for key,value in wd.items():
+        if key in final_word_dict_solimo:
+            final_word_dict_solimo[key] += value
+        else:
+            final_word_dict_solimo[key] = value
+
+# sort the final_word_dict based on values in descending order
+brand_rev_data = rev_data[rev_data.ASIN.isin(solimos_asins.ASIN)]
+negatives = brand_rev_data[brand_rev_data.textblob_sentiment == 'Negative']
+all_words = [word for sublist in negatives['tokenized_text'] for word in sublist]
+filtered_words = [word for word in all_words if word.lower() not in stop_words]
+word_freq = Counter(filtered_words)
+
+positives = brand_rev_data[brand_rev_data.textblob_sentiment == 'Positive']
+all_words = [word for sublist in positives['tokenized_text'] for word in sublist]
+filtered_words = [word for word in all_words if word.lower() not in stop_words]
+word_freq = Counter(filtered_words)
+
+#####
+'Get summary from OpenAI GTP'
+words_str = " ".join(w for w,v in word_freq.items() if v > 2)#[:4000]
+words_str = " ".join(w for w,v in final_word_dict_solimo.items() if v > .001)#[:4000]
+print(len(words_str ))
+# Pass the words to OpenAI API for summarization
+summary = openai.Completion.create(
+    engine="text-davinci-003",
+    prompt=f"Summarize the product using the following words extracted form reviews: {words_str}",
+    #prompt=f"Summarize ub bullets the bad part of the product using the following words extracted form reviews: {words_str}",
+    max_tokens=300, # to be returned
+    n=2,
+    stop=None,
+    temperature=0.1,
+)
+summary.choices[0].text.replace('\n','')
+
+
+'Get summary from OpenAI GTP'
+words_str = " ".join(w for w,v in final_word_dict_solimo.items() if v > .001)
+print(len(words_str ))
+# Pass the words to OpenAI API for summarization
+summary = openai.Completion.create(
+    engine="text-davinci-003",
+    prompt=f"Summarize the product using the following words extracted form reviews: {words_str}",
+    max_tokens=300, # to be returned
+    n=1,
+    stop=None,
+    temperature=0.1,
+)
+
+brand_summary = pd.DataFrame()
+brand_summary.at[0,'category']= category
+brand_summary.at[0,'brand']= brand
+brand_summary.at[0,'summary'] = summary.choices[0].text.replace('\n','')
+brand_summary['word_dict'] = None
+brand_summary.at[0,'word_dict']= final_word_dict_solimo
+
+if category:
+    brand_summary.to_csv(basepath + rf'Raw data/{category}/{brand}_summary.csv',index=False)
+    brand_summary.to_parquet(basepath + rf'Raw data/{category}/{brand}_summary.parquet',index=False)
+else:
+    brand_summary.to_csv(basepath + rf'Raw data/Brands/{brand}/{brand}_summary.csv',index=False)
+    brand_summary.to_parquet(basepath + rf'Raw data/Brands/{brand}/{brand}_summary.parquet',index=False)
+
+
+from scipy import spatial
+
+# convert the dictionaries to vectors
+v1 = [final_word_dict[word] if word in final_word_dict else 0 for word in set(final_word_dict.keys()) | set(final_word_dict_solimo.keys())]
+v2 = [final_word_dict_solimo[word] if word in final_word_dict_solimo else 0 for word in set(final_word_dict.keys()) | set(final_word_dict_solimo.keys())]
+
+# compute the cosine similarity between the vectors
+cosine_sim = 1 - spatial.distance.cosine(v1, v2)
+
+# print the cosine similarity
+print(cosine_sim)
+
+
+# get the set of words that appear in both dictionaries
+common_words = set(final_word_dict.keys()) & set(final_word_dict_solimo.keys())
+
+# create vectors for the common words
+v1 = [final_word_dict[word] for word in common_words]
+v2 = [final_word_dict_solimo[word] for word in common_words]
+
+# compute the cosine similarity between the vectors
+cosine_sim = 1 - spatial.distance.cosine(v1, v2)
+
+# print the cosine similarity
+print(cosine_sim)
+
+    
+# In[Reviews to txt documents]:
+
+docs_path = rf'Raw data/{category}/datascience/revs_as_documents/'
+
+
+for i in rev_data.index[:100]:
+    #break
+    row = rev_data.loc[i]
+    pd.DataFrame(data = {'body':[row.body]},index=[0]).to_csv(basepath + docs_path + f'{row.rev_id}.txt',index=False,header=False)
+
+
+# In[Load embedings to GPT 4]:
+#from openai.embeddings_utils import cosine_similarity, get_embedding
+#text_example = rev_data.loc[1].body
+#text_embeddings = get_embedding(text_example, engine = "text-embedding-ada-002")
+tok = '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'    
+
+
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.vectorstores import Chroma , FAISS
+from langchain.vectorstores import FAISS as FAISSVectorStore
+from langchain.text_splitter import CharacterTextSplitter
+from langchain import OpenAI, VectorDBQA
+from langchain.document_loaders import DirectoryLoader
+from langchain.chains import RetrievalQA
+import magic
+
+#nltk.download('averaged_perceptron_tagger')
+
+# pip install langchain
+# order is impotant for chromadb
+
+# conda install duckdb
+# conda install fastapi
+# conda install posthog
+# conda install uvicorn
+# conda install sentence-transformers
+# conda install pydantic
+# conda install hnswlib
+# pip install chromadb
+
+os.environ["OPENAI_API_KEY"] = tok
+
+loader = DirectoryLoader(basepath + docs_path, glob='**/*.txt')
+documents = loader.load()
+text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+#texts = [text_splitter.split_text(b) for b in rev_data.body if pd.isna(b) is False ]
+texts = text_splitter.split_documents(documents)
+
+len(texts)
+
+
+embeddings = OpenAIEmbeddings(openai_api_key= os.environ["OPENAI_API_KEY"])
+
+#docsearch = Chroma.from_texts( texts ,embeddings ,persist_directory = rf'Raw data/{category}/datascience/chromadb/')
+docsearch = Chroma.from_documents( texts , embeddings ,persist_directory = rf'Raw data/{category}/datascience/chromadb/')
+
+
+qa = RetrievalQA.from_chain_type(llm=OpenAI(), chain_type="stuff", retriever, vectorstore=docsearch, return_source_documents=True)
+help(RetrievalQA.from_chain_type)
+
+vectorstore
+
+#######
+#######
+#######
+
+
+
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.vectorstores import Chroma , FAISS
+from langchain.vectorstores import FAISS as FAISSVectorStore
+from langchain.text_splitter import CharacterTextSplitter
+from langchain import OpenAI, VectorDBQA
+from langchain.document_loaders import DirectoryLoader
+from langchain.chains import RetrievalQA
+import magic
+
+# Set the OpenAI API key
+os.environ["OPENAI_API_KEY"] = tok
+
+# Load the documents using DirectoryLoader
+loader = DirectoryLoader(basepath + docs_path, glob='**/*.txt')
+documents = loader.load()
+
+# Split the documents into smaller chunks
+text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+texts = text_splitter.split_documents(documents)
+
+# Embed the texts using OpenAI
+embeddings = OpenAIEmbeddings(openai_api_key=os.environ["OPENAI_API_KEY"])
+embeddings_texts = embeddings.embed_documents([text.dict()['page_content'] for text in texts])
+
+# Index the embeddings using Chroma
+docsearch = Chroma.from_embeddings(embeddings_texts, persist_directory="chromadb")
+docsearch = Chroma.from_documents( texts , embeddings ,persist_directory = rf'Raw data/{category}/datascience/chromadb/')
+help(docsearch)
+# Define the Faiss vector store
+vector_size = 512
+index_to_docstore_id = {str(idx): text for idx, text in enumerate(texts)}
+retriever = FAISSVectorStore("retriever.faiss", "IVF1,Flat", vector_size, index_to_docstore_id=index_to_docstore_id)
+for idx, text in enumerate(texts):
+    # Embed the text using Chroma and add it to the vector store
+    embedding = docsearch.embed(text)
+    embedding = docsearch.embeddings[idx]
+    retriever.add(str(idx), embedding)
+    
+    
+    
+# Create a RetrievalQA instance with the configured settings
+qa = RetrievalQA.from_chain_type(llm=OpenAI(), chain_type="stuff", retriever=retriever, vectorstore=docsearch, return_source_documents=True, vectorstore_query_kwargs={"top_k": 10})
+
+
+# In[CHAT GPT]:
+
+import openai
+openai.api_key = tok
+MAX_TOKENS = 4096
+
+engine = 'gpt-4'
+engine = "gpt-3.5-turbo"
+engine = "text-davinci-003"
+
+prompt_to_instruct = """  i am going to pass you reviews with the following structure > id : review.
+keep them to create a summary at the end.    Bellow some reviews: \n """
+
+prompt_to_feed =  'Bellow more  reviews'
+prompt_to_get_summar = """  summarize product reviews provided bellow in bullets 5 pos and 5 cons add frequency statistics : """
+
+
+solimo_rev_data = rev_data[rev_data.ASIN.isin(solimos_asins.ASIN)]
+solimo_rev_data['tmp'] = solimo_rev_data.id + ' : '  + solimo_rev_data.sentence
+
+solimo_rev_data.loc[:20].textblob_sentiment
+
+
+data_for_promt = "\n".join(x for x in solimo_rev_data['tmp'][:10] )
+
+len(prompt_to_get_summar + data_for_promt)
+print(data_for_promt)
+response = openai.Completion.create(
+            engine = engine,
+            prompt = prompt_to_get_summar + data_for_promt ,
+            max_tokens = MAX_TOKENS,
+            temperature = .1
+        )
+
+res = response['choices'][0]['text']
+print(res)
+
+data_for_promt2 = "\n".join(x for x in solimo_rev_data['tmp'][10:25] )
+len(prompt_to_get_summar + data_for_promt2)
+print(data_for_promt2)
+response2 = openai.Completion.create(
+            engine = engine,
+            prompt = prompt_to_get_summar + data_for_promt2,
+            max_tokens = MAX_TOKENS,
+            temperature = .1
+        )
+res2 = response2['choices'][0]['text']
+print(res2)
+
+data_for_promt3 = "\n".join(x for x in solimo_rev_data['tmp'][25:45] )
+len(prompt_to_get_summar + data_for_promt3)
+print(data_for_promt3)
+response3 = openai.Completion.create(
+            engine = engine,
+            prompt = prompt_to_get_summar + data_for_promt3,
+            max_tokens = MAX_TOKENS,
+            temperature = .1
+        )
+res3 = response3['choices'][0]['text']
+print(res3)
+
+
+data_for_promt4 = "\n".join(x for x in solimo_rev_data['tmp'][45:65] )
+len(prompt_to_get_summar + data_for_promt4)#
+print(prompt_to_get_summar + data_for_promt4)#
+response4 = openai.Completion.create(#
+            engine = engine,
+            prompt = prompt_to_get_summar + data_for_promt4, #
+            max_tokens = MAX_TOKENS,
+            temperature = .1
+        )
+res4 = response4['choices'][0]['text'] #
+print(res4) #
+print(f" Total Tokens: {response4['usage']['total_tokens']}")
+
+
+
+
+data_for_promt5 = "\n".join(x for x in solimo_rev_data['tmp'][65:75] )
+len(prompt_to_get_summar + data_for_promt5)#
+print(prompt_to_get_summar + data_for_promt5)#
+response5 = openai.Completion.create(#
+            engine = engine,
+            prompt = 'Provide detail summary of the product : \n' + data_for_promt5, #
+            max_tokens = MAX_TOKENS,
+            temperature = .1
+        )
+res5 = response5['choices'][0]['text'] #
+print(res5) #
+print(f" Total Tokens: {response5['usage']['total_tokens']}")
+
+
+res_list = res4.splitlines()
+
+'Negative reviews'
+
+data_for_neg_revs = "\n".join(x for x in solimo_rev_data[solimo_rev_data.textblob_sentiment=='Negative']['tmp'].iloc[:15] )
+
+len(prompt_to_get_summar + data_for_neg_revs)#
+print(prompt_to_get_summar + data_for_neg_revs)#
+response_neg_revs = openai.Completion.create(#
+            engine = engine,
+            prompt = prompt_to_get_summar + data_for_neg_revs, #
+            temperature = .1
+        )
+res_neg_rev = response_neg_revs['choices'][0]['text'] #
+print(res_neg_rev) #
+print(f" Total Tokens: {response5['usage']['total_tokens']}")
+
+
+data_for_neg_revs2 = "\n".join(x for x in solimo_rev_data[solimo_rev_data.textblob_sentiment=='Negative']['tmp'].iloc[15:30] )
+
+asin_data.query(" ASIN == 'B07NJQ9RRG' ")
+
+print(data_for_neg_revs2)#
+rev_data.query(" id == 'B07CJY34JN_312' ")
+rev_data.iloc[312].body
+rev_data.iloc[312].sentence
+
+
+
+help(openai)
+# checking
+
+response5 = openai.Completion.create(#
+            engine = engine,
+            prompt = ''' How many reviews have i pass you to summarize?
+                        provide a summary of the reviews ''', #
+            max_tokens = MAX_TOKENS,
+            temperature = .1
+        )
+res5 = response5['choices'][0]['text'] #
+print(res5) #
+
+prompt_web_data = """ summarize te content of the column body from the table located at  http://108.62.123.135/reviews.  Provide a list with 5 pros and 5 cons with description and frequency statistic of the reviews  Also proivde a general description of the product that the reviews mention """
+response_web_Data = openai.Completion.create(#
+            engine = engine,
+            prompt = prompt_web_data, #
+            max_tokens = 3900,
+            temperature = .0
+        )
+res_web_data = response_web_Data['choices'][0]['text'] #
+print(res_web_data) #
+
+prompt_web_data_2 = """ summarize te content of the column body from the table located at  http://108.62.123.135/reviews  Provide a list with 5 pros and 5 cons with description and frequency statistic of the reviews  Also proivde a general description of bath salt products that the reviews mention """
+response_web_Data_2 = openai.Completion.create(#
+            engine = engine,
+            prompt = prompt_web_data_2, #
+            max_tokens = 3900,
+            temperature = 0.01
+        )
+res_web_data_2 = response_web_Data_2['choices'][0]['text'] #
+print(res_web_data_2) #
+
+
+prompt_web_data_3 = """ show how many reviews are int the table located at  http://108.62.123.135/reviews  Provide a list top pro and top cons splited by sentiment located at column textblob_sentiment"""
+response_web_Data_3 = openai.Completion.create(#
+            engine = engine,
+            prompt = prompt_web_data_3, #
+            max_tokens = 3900,
+            temperature = 0.01
+        )
+res_web_data_3 = response_web_Data_3['choices'][0]['text'] #
+print(res_web_data_3) #
+
+prompt_web_data_4 = """ summarize te content of the column body from the table located at  http://108.62.123.135/reviews  Provide a list 5 top pro and 5 top cons topics using only mixed sentiment reviews identify sentiment with column textblob_sentiment"""
+response_web_Data_4 = openai.Completion.create(#
+            engine = engine,
+            prompt = prompt_web_data_4, #
+            max_tokens = 3900,
+            temperature = 0.01
+        )
+res_web_data_4 = response_web_Data_4['choices'][0]['text'] #
+print(res_web_data_4) #
+
+prompt_web_data_5 = """ summarize the reviews located at column body from the table located at  http://108.62.123.135/reviews  Provide a list 5 top pro and 5 top cons topics with description and frequency statistic  using only Neutral sentiment reviews identify sentiment with column textblob_sentiment """
+response_web_Data_5 = openai.Completion.create(#
+            engine = engine,
+            prompt = prompt_web_data_5, #
+            max_tokens = 3900,
+            temperature = 0.01
+        )
+res_web_data_5 = response_web_Data_5['choices'][0]['text'] #
+print(res_web_data_5) #
+
+
+
+
+# In[NLP sklearn]:
+from sklearn.feature_extraction.text import TfidfVectorizer
+import functools
+import operator
+
+tot_asins = rev_data.ASIN.unique()
+rev_data_tfidf = pd.DataFrame()
+rev_data_tfidf['index'] = ''
+r = 0
+for asin in tot_asins:
+    vectorizer = TfidfVectorizer()
+    vectors = vectorizer.fit_transform(list(rev_data.loc[rev_data.ASIN == asin].sentence))
+    feature_names = vectorizer.get_feature_names()
+    dense = vectors.todense()
+    denselist = dense.tolist()
+    dfq1 =pd.DataFrame(denselist, columns=feature_names).quantile(.25).reset_index().rename(columns={0.25:asin+'_q1'})
+    dfq2 =pd.DataFrame(denselist, columns=feature_names).quantile(.5).reset_index().rename(columns={0.5:asin+'_q2'})
+    dfq3 =pd.DataFrame(denselist, columns=feature_names).quantile(.75).reset_index().rename(columns={0.75:asin+'_q3'})
+    dfqmin =pd.DataFrame(denselist, columns=feature_names).min().reset_index().rename(columns={0:asin+'_min'})
+    dfqmax =pd.DataFrame(denselist, columns=feature_names).max().reset_index().rename(columns={0:asin+'_max'})
+    df = pd.DataFrame(denselist, columns=feature_names).max().reset_index().rename(columns={0:asin})
+    df[asin] = dfq1[asin+'_q1'].astype(str) +'|'+ dfq2[asin+'_q2'].astype(str) +'|'+ dfq3[asin+'_q3'].astype(str) +'|'+ dfqmin[asin+'_min'].astype(str) +'|'+ dfqmax[asin+'_max'].astype(str)
+    df.columns
+    rev_data_tfidf = pd.merge(df,
+                              rev_data_tfidf,
+                              on='index',
+                              how='outer')
+                              
+    r+=1
+    if r % 10 ==0:
+        print('{} | {:%}'.format(datetime.now(),r/len(tot_asins)))
+rev_data_tfidf.rename(columns={'index':'word'},inplace=True)
+rev_data_tfidf.to_csv('rev_data_tfidf.csv',encoding='utf-8',index=False)
+
+rev_data_tfidf.shape
+
+
+rev_data_tfidf.word.unique()
+for asin in tot_asins:
+    df = rev_data_tfidf.columns.str.contains(asin)
+    dn = rev_data_tfidf.word
+    df = rev_data_tfidf.loc[:,df].copy()
+    df['word'] = rev_data_tfidf.word
+    df['q1'] = df[asin].str.split('|').str[1].astype(float)
+    df['mean'] = df[asin].str.split('|').str[2].astype(float)
+    df['q3'] = df[asin].str.split('|').str[3].astype(float)
+    df['min'] = df[asin].str.split('|').str[4].astype(float)
+    df['max'] = df[asin].str.split('|').str[5].astype(float)
+    
+    df.sort_values('max',ascending=False,inplace=True)
+    df.head(20)
+    df.tail(5)
+    
+rev_data.to_csv('rating_data_pro.csv',encoding='utf-8',index=False)
+
+# In[Summary]
+
+orig_asins_file = pd.read_csv('Best Selling ASINs.csv',encoding='utf-8')
+
+asin_data = asin_data.groupby('ASIN').first()
+
+orig_asins_file = orig_asins_file.merge(asin_data,
+                                        on='ASIN',
+                                        how='left')
+
+orig_asins_file['rating'] = orig_asins_file.apply(lambda x: 5*x['5_star_pct' ]+ 4 *x['4_star_pct'] + \
+                                                  3*x['3_star_pct'] + 2*x['2_star_pct'] + 1 * x['1_star_pct'],axis=1)
+
+rev_data_by_asin = rev_data.groupby('ASIN').agg({'rating':[min,lambda x:x.quantile(.15),\
+                                        np.mean,\
+                                        lambda x:x.quantile(.75),\
+                                        max],
+                                         'sentence':lambda x : " ".join(x)}).reset_index(col_level=1,col_fill=1).rename(\
+                                                                                  columns={'min':'review_rating_min',
+                                                                                           '<lambda_0>':'review_rating_q1',
+                                                                                           'mean':'review_rating_avg',
+                                                                                           '<lambda_1>':'review_rating_q3',
+                                                                                           'max':'review_rating_max',
+                                                                                           '<lambda>':'tokenized_text'
+                                                                                           })
+rev_data_by_asin.columns = rev_data_by_asin.columns.droplevel(0)
+orig_asins_file = orig_asins_file.merge(rev_data_by_asin,
+                                        how='left',
+                                        on='ASIN')
+
+orig_asins_file.columns
+
+gb_by_category = orig_asins_file.groupby('Category Name').agg({'rating':[min,lambda x:x.quantile(.15), np.mean,lambda x:x.quantile(.75),max],    
+                                              'total_rating_count':sum,
+                                              'ASIN':len,
+                                              'numer_of_reviews':sum,
+                                              'review_rating_min':min,
+                                              'review_rating_q1':lambda x:x.quantile(.25),
+                                              'review_rating_avg':np.mean,
+                                              'review_rating_q3':lambda x:x.quantile(.75),
+                                              'review_rating_max':max
+                                              }).rename(columns={'ASIN':'num_of_asins'}) 
+
+
+
+
+writer = pd.ExcelWriter('Output/Ratings.xlsx', engine='xlsxwriter')
+gb_by_category.to_excel(writer, sheet_name='By category')
+orig_asins_file.to_excel(writer, sheet_name='By ASIN')
+writer.save()
+
+
+                  
+
+# In[Otehr stuff]:
+    
+from statsmodels.graphics.tsaplots import plot_pacf
+from statsmodels.graphics.tsaplots import plot_acf
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from statsmodels.tsa.stattools import adfuller
+
+from tqdm import tqdm_notebook
+import numpy as np
+import pandas as pd
